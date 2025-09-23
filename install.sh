@@ -26,6 +26,17 @@ echo "🛑 Stopping existing services..."
 sudo systemctl stop powermonitor 2>/dev/null || true
 sudo systemctl disable powermonitor 2>/dev/null || true
 
+# Step 2b: Install systemd service file
+echo "📋 Installing systemd service file..."
+if [ -f "services/powermonitor.service" ]; then
+    sudo cp services/powermonitor.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    echo "✅ Service file installed to /etc/systemd/system/"
+else
+    echo "⚠️  Warning: services/powermonitor.service not found"
+    echo "   Service will need to be configured manually"
+fi
+
 # Step 3: Check if enhanced setup script exists
 if [ ! -f "enhanced_turnkey_setup.py" ]; then
     echo "❌ enhanced_turnkey_setup.py not found!"
