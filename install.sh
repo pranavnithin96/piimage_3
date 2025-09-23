@@ -61,7 +61,13 @@ sudo cp enhanced_turnkey_setup.py /opt/powermonitor/turnkey_setup.py
 sudo chmod +x /opt/powermonitor/turnkey_setup.py
 sudo chown pi:pi /opt/powermonitor/turnkey_setup.py
 
-# Step 5: Update the auto-setup script for SSH login
+# Step 5: Install main monitoring script
+echo "📦 Installing monitoring script..."
+sudo cp src/pi_monitor_script.py /opt/powermonitor/pi_monitor_script.py
+sudo chmod +x /opt/powermonitor/pi_monitor_script.py
+sudo chown pi:pi /opt/powermonitor/pi_monitor_script.py
+
+# Step 5b: Update the auto-setup script for SSH login
 echo "🔑 Updating auto-setup for SSH login..."
 sudo cp scripts/auto_setup.sh /opt/powermonitor/auto_setup.sh
 echo "🔧 Installing interactive setup script..."
@@ -245,6 +251,8 @@ sudo chmod +x /opt/powermonitor/prepare_sd_card.sh
 # Step 9: Set permissions
 sudo chown -R pi:pi /opt/powermonitor
 sudo chown -R pi:pi /var/log/powermonitor
+sudo chown -R pi:pi /etc/powermonitor
+sudo chmod 755 /etc/powermonitor
 
 # Step 10: Enable SPI
 echo "🔌 Enabling SPI interface..."
