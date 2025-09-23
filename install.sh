@@ -5,7 +5,7 @@ echo "===================================="
 # Copy the enhanced setup to current directory if needed
 if [ -f "src/turnkey_setup_interactive.py" ]; then
     echo "✅ turnkey_setup_interactive.py found"
-    cp src/turnkey_setup_interactive.py enhanced_turnkey_setup.py
+    sudo cp src/turnkey_setup_interactive.py enhanced_turnkey_setup.py
 else
     echo "❌ turnkey_setup_interactive.py not found!"
     echo "Please check that you have the complete repository."
@@ -19,7 +19,7 @@ echo "===================================="
 echo "📦 Installing required dependencies..."
 sudo apt update
 sudo apt install -y python3-pip python3-requests
-pip3 install pytz requests spidev
+pip3 install --break-system-packages pytz requests spidev || sudo apt install -y python3-pytz python3-spidev
 
 # Step 2: Stop any existing services
 echo "🛑 Stopping existing services..."
@@ -37,18 +37,17 @@ else
     echo "   Service will need to be configured manually"
 fi
 
-# Step 3: Check if enhanced setup script exists
-if [ ! -f "enhanced_turnkey_setup.py" ]; then
-    echo "❌ enhanced_turnkey_setup.py not found!"
-    echo ""
-    echo "Please save the enhanced setup script as 'enhanced_turnkey_setup.py' first:"
-    echo "1. Copy the enhanced turnkey setup code from Claude"
-    echo "2. Save it as: enhanced_turnkey_setup.py"
-    echo "3. Run this deployment script again"
+# Step 3: Use turnkey_setup_interactive.py as enhanced setup
+if [ -f "src/turnkey_setup_interactive.py" ]; then
+    echo "✅ Using turnkey_setup_interactive.py as enhanced setup"
+    enhanced_setup="src/turnkey_setup_interactive.py"
+elif [ -f "enhanced_turnkey_setup.py" ]; then
+    echo "✅ Found enhanced_turnkey_setup.py"
+    enhanced_setup="enhanced_turnkey_setup.py"
+else
+    echo "❌ No setup script found!"
     exit 1
 fi
-
-echo "✅ Found enhanced_turnkey_setup.py"
 
 # Step 4: Install the enhanced setup system
 echo "📄 Installing enhanced setup system..."
@@ -57,7 +56,7 @@ sudo mkdir -p /etc/powermonitor
 sudo mkdir -p /var/log/powermonitor
 
 # Copy the enhanced setup script
-sudo cp enhanced_turnkey_setup.py /opt/powermonitor/turnkey_setup.py
+sudo cp "$enhanced_setup" /opt/powermonitor/turnkey_setup.py
 sudo chmod +x /opt/powermonitor/turnkey_setup.py
 sudo chown pi:pi /opt/powermonitor/turnkey_setup.py
 
