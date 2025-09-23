@@ -257,6 +257,22 @@ sudo chmod 755 /etc/powermonitor
 echo "🔌 Enabling SPI interface..."
 sudo raspi-config nonint do_spi 0
 
+# Step 11: Check if config exists and start service
+echo "🚀 Starting PowerMonitor service..."
+if [ -f "/etc/powermonitor/config.conf" ]; then
+    echo "✅ Configuration found, starting service..."
+    sudo systemctl start powermonitor
+    sudo systemctl enable powermonitor
+    echo "✅ PowerMonitor service started and enabled!"
+    echo ""
+    echo "📊 Service status:"
+    sudo systemctl status powermonitor --no-pager
+else
+    echo "⚠️  No configuration found yet"
+    echo "   Run: python3 /opt/powermonitor/pi_monitor_script.py"
+    echo "   to configure the system first"
+fi
+
 echo ""
 echo "✅ Enhanced Power Monitor Deployment Complete!"
 echo ""
