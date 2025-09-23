@@ -1,0 +1,18 @@
+[Unit]
+Description=Power Monitor Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/powermonitor
+ExecStart=/usr/bin/python3 /opt/powermonitor/pi_monitor_script.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
