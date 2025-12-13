@@ -59,6 +59,8 @@ sudo mkdir -p /var/log/powermonitor
 sudo cp "$enhanced_setup" /opt/powermonitor/turnkey_setup.py
 sudo chmod +x /opt/powermonitor/turnkey_setup.py
 sudo chown pi:pi /opt/powermonitor/turnkey_setup.py
+## adding to copy the config file 
+sudo cp config/config.conf /etc/powermonitor/
 
 # Step 5: Install main monitoring script
 echo "📦 Installing monitoring script..."
