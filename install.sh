@@ -55,6 +55,12 @@ sudo mkdir -p /opt/powermonitor
 sudo mkdir -p /etc/powermonitor
 sudo mkdir -p /var/log/powermonitor
 
+# Copy config file if it exists in the repo
+if [ -f "config/config.conf" ]; then
+    sudo cp config/config.conf /etc/powermonitor/config.conf
+    echo "✅ Config file copied to /etc/powermonitor/"
+fi
+
 # Copy the enhanced setup script
 sudo cp "$enhanced_setup" /opt/powermonitor/turnkey_setup.py
 sudo chmod +x /opt/powermonitor/turnkey_setup.py
