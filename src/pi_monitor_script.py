@@ -32,8 +32,7 @@ DETECTED_TIMEZONE = "UTC"
 
 CT_BURDEN_RESISTOR = 18.0
 CT_CALIBRATION     = 1.0
-CT_REVERSED        = True
-DEFAULT_CALIBRATION= 0.88
+DEFAULT_CALIBRATION = 0.88
 
 CT_CHANNELS       = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
 FREQUENCY         = 60
@@ -98,32 +97,101 @@ def load_config():
     cfg = {}
     with open(CONFIG_PATH) as f:
         for line in f:
-            line=line.strip()
-            if not line or line.startswith("#"): continue
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
             if "=" in line:
-                k,v=line.split("=",1)
+                k, v = line.split("=", 1)
                 cfg[k.strip()] = v.strip()
     return cfg
 
+def validate_config(cfg):
+    """Validate config values and return safe defaults if invalid"""
+    errors = []
+
+    # Validate GRID_VOLTAGE
+    try:
+        voltage = float(cfg.get("GRID_VOLTAGE", GRID_VOLTAGE))
+        if voltage < 100 or voltage > 250:
+            errors.append(f"GRID_VOLTAGE={voltage} out of range (100-250), using {GRID_VOLTAGE}")
+            voltage = GRID_VOLTAGE
+    except ValueError:
+        errors.append(f"GRID_VOLTAGE invalid, using {GRID_VOLTAGE}")
+        voltage = GRID_VOLTAGE
+
+    # Validate CT_RATING
+    try:
+        ct = int(cfg.get("CT_RATING", CT_RATING))
+        if ct not in [30, 50, 100, 200]:
+            errors.append(f"CT_RATING={ct} not supported (30/50/100/200), using {CT_RATING}")
+            ct = CT_RATING
+    except ValueError:
+        errors.append(f"CT_RATING invalid, using {CT_RATING}")
+        ct = CT_RATING
+
+    # Validate SEND_INTERVAL
+    try:
+        interval = int(cfg.get("SEND_INTERVAL", SEND_INTERVAL))
+        if interval < 1 or interval > 60:
+            errors.append(f"SEND_INTERVAL={interval} out of range (1-60), using {SEND_INTERVAL}")
+            interval = SEND_INTERVAL
+    except ValueError:
+        errors.append(f"SEND_INTERVAL invalid, using {SEND_INTERVAL}")
+        interval = SEND_INTERVAL
+
+    # Validate SERVER_URL
+    server = cfg.get("SERVER_URL", SERVER_URL)
+    if not server.startswith("http://") and not server.startswith("https://"):
+        errors.append(f"SERVER_URL must start with http:// or https://, using {SERVER_URL}")
+        server = SERVER_URL
+
+    # Print any validation errors
+    for error in errors:
+        print(f"⚠️ Config warning: {error}")
+
+    return {
+        "DEVICE_ID": cfg.get("DEVICE_ID", DEVICE_ID),
+        "LOCATION_NAME": cfg.get("LOCATION_NAME", LOCATION_NAME),
+        "SERVER_URL": server,
+        "GRID_VOLTAGE": voltage,
+        "CT_RATING": ct,
+        "SEND_INTERVAL": interval,
+        "DETECTED_TIMEZONE": cfg.get("DETECTED_TIMEZONE", DETECTED_TIMEZONE)
+    }
+
 cfg = load_config()
-DEVICE_ID         = cfg.get("DEVICE_ID", DEVICE_ID)
-LOCATION_NAME     = cfg.get("LOCATION_NAME", LOCATION_NAME)
-SERVER_URL        = cfg.get("SERVER_URL", SERVER_URL)
-GRID_VOLTAGE      = float(cfg.get("GRID_VOLTAGE", GRID_VOLTAGE))
-CT_RATING         = int(cfg.get("CT_RATING", CT_RATING))
-SEND_INTERVAL     = int(cfg.get("SEND_INTERVAL", SEND_INTERVAL))
-DETECTED_TIMEZONE = cfg.get("DETECTED_TIMEZONE", DETECTED_TIMEZONE)
+validated = validate_config(cfg)
+DEVICE_ID         = validated["DEVICE_ID"]
+LOCATION_NAME     = validated["LOCATION_NAME"]
+SERVER_URL        = validated["SERVER_URL"]
+GRID_VOLTAGE      = validated["GRID_VOLTAGE"]
+CT_RATING         = validated["CT_RATING"]
+SEND_INTERVAL     = validated["SEND_INTERVAL"]
+DETECTED_TIMEZONE = validated["DETECTED_TIMEZONE"]
 
 # ============================================================
 # Logging & time
 # ============================================================
+# Cache timezone object for performance (created once, used many times)
+_cached_timezone = None
+
+def get_local_timezone():
+    """Get cached timezone object"""
+    global _cached_timezone
+    if _cached_timezone is None:
+        try:
+            _cached_timezone = pytz.timezone(DETECTED_TIMEZONE)
+        except Exception:
+            _cached_timezone = timezone.utc
+    return _cached_timezone
+
 def log_message(message: str):
     try:
-        local_tz = pytz.timezone(DETECTED_TIMEZONE)
+        local_tz = get_local_timezone()
         local_time = datetime.now(local_tz)
         timestamp = local_time.strftime('%Y-%m-%d %H:%M:%S %Z')
     except Exception:
-        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
     print(f"[{timestamp}] {message}")
     sys.stdout.flush()
 
@@ -147,11 +215,14 @@ def init_spi():
         return False
 
 def read_adc(channel: int):
-    if channel < 0 or channel > 7: return -1
+    """Read ADC value from specified channel (0-7)"""
+    if channel < 0 or channel > 7:
+        return -1
     try:
         adc = spi.xfer2([1, (8 + channel) << 4, 0])
         return ((adc[1] & 3) << 8) + adc[2]
-    except Exception:
+    except Exception as e:
+        # SPI errors can happen occasionally, don't flood logs
         return -1
 
 def collect_all_ct_samples(num_samples: int):
@@ -179,28 +250,46 @@ def volts_per_amp(rating: int):
     return 1.0/float(rating)
 
 def calculate_power_for_ct(samples, ct_num):
-    if not samples or len(samples) < 100: return None
+    """Calculate power from CT samples using RMS calculation"""
+    if not samples or len(samples) < 100:
+        return None
+
     num = len(samples)
     v_per_code = 3.31 / ADC_MAX_CODE
     scaling = (v_per_code * CT_CALIBRATION * DEFAULT_CALIBRATION) / volts_per_amp(CT_RATING)
+
+    # Calculate RMS current using standard deviation method
+    # RMS = sqrt(mean(x²) - mean(x)²) for AC signals centered around DC offset
     sum_squares = sum(s*s for s in samples)
     sum_values = sum(samples)
-    avg_raw = sum_values/num
-    mean_square = sum_squares/num
-    current_rms = math.sqrt(max(0, mean_square - (avg_raw*avg_raw))) * scaling
+    avg_raw = sum_values / num
+    mean_square = sum_squares / num
+    variance = max(0, mean_square - (avg_raw * avg_raw))
+    current_rms = math.sqrt(variance) * scaling
+
+    # Track signal variation for diagnostics
     variation = max(samples) - min(samples)
 
+    # Assumed power factor (0.9 is typical for residential loads)
+    # Note: True PF would require voltage waveform measurement
     pf = 0.9
-    power = GRID_VOLTAGE * abs(current_rms) * pf
-    if CT_REVERSED:
-        if power < 0: power = abs(power)
-        else: current_rms = -abs(current_rms)
-    if abs(power) < 1.0: power = 0.0
-    apparent = GRID_VOLTAGE * abs(current_rms)
-    pf = pf if apparent > 0.1 else 0.0
 
-    return {"power": abs(power), "current": abs(current_rms),
-            "voltage": GRID_VOLTAGE, "pf": pf, "variation": variation}
+    # Calculate real power (W) = V × I × PF
+    power = GRID_VOLTAGE * current_rms * pf
+
+    # Filter out noise floor (readings below 1W are likely noise)
+    if power < 1.0:
+        power = 0.0
+        current_rms = 0.0
+        pf = 0.0
+
+    return {
+        "power": round(power, 2),
+        "current": round(current_rms, 4),
+        "voltage": GRID_VOLTAGE,
+        "pf": pf,
+        "variation": variation
+    }
 
 def calculate_all_ct_power(all_samples):
     return {ct: calculate_power_for_ct(all_samples.get(ct), ct) for ct in CT_CHANNELS}
@@ -393,16 +482,30 @@ def format_ct_results_for_log(ct_results):
 # Main loop & signals
 # ============================================================
 def signal_handler(sig, frame):
+    """Handle shutdown signals gracefully - allows buffer to be saved"""
     global running
     log_message("Received shutdown signal, stopping service...")
     running = False
-    if spi:
-        try: spi.close()
-        except: pass
-    sys.exit(0)
+    # Don't call sys.exit() here - let main() finish and save buffer
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+def cleanup():
+    """Clean up resources on shutdown"""
+    global spi
+    # Wait for sender thread to finish saving buffer
+    if sender_thread and sender_thread.is_alive():
+        log_message("Waiting for sender thread to finish...")
+        sender_thread.join(timeout=5)
+
+    # Close SPI
+    if spi:
+        try:
+            spi.close()
+            log_message("SPI closed")
+        except Exception as e:
+            log_message(f"⚠️ Error closing SPI: {e}")
 
 def main():
     log_message(f"🔌 Power Monitor Starting - {LOCATION_NAME}")
@@ -474,7 +577,8 @@ def main():
             time.sleep(5)
 
     log_message("🛑 Power Monitor Service Stopped")
-    save_buffer_to_disk()
+    save_buffer_to_disk(drain_queue=True)
+    cleanup()
 
 if __name__ == "__main__":
     main()
