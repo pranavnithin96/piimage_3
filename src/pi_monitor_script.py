@@ -64,7 +64,7 @@ def first_time_setup():
     grid_voltage= input(f"Grid voltage (V) [{GRID_VOLTAGE}]: ").strip() or str(GRID_VOLTAGE)
     ct_rating   = input(f"CT rating (A) [{CT_RATING}]: ").strip() or str(CT_RATING)
     send_interval = input(f"Send interval (s) [{SEND_INTERVAL}]: ").strip() or str(SEND_INTERVAL)
-    timezone    = input(f"Timezone (IANA) [{DETECTED_TIMEZONE}]: ").strip() or DETECTED_TIMEZONE
+    tz_name     = input(f"Timezone (IANA) [{DETECTED_TIMEZONE}]: ").strip() or DETECTED_TIMEZONE
 
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, "w") as f:
@@ -74,7 +74,7 @@ def first_time_setup():
         f.write(f"GRID_VOLTAGE={grid_voltage}\n")
         f.write(f"CT_RATING={ct_rating}\n")
         f.write(f"SEND_INTERVAL={send_interval}\n")
-        f.write(f"DETECTED_TIMEZONE={timezone}\n")
+        f.write(f"DETECTED_TIMEZONE={tz_name}\n")
 
     print(f"\n✅ Config saved to {CONFIG_PATH}")
     return {
@@ -84,7 +84,7 @@ def first_time_setup():
         "GRID_VOLTAGE": grid_voltage,
         "CT_RATING": ct_rating,
         "SEND_INTERVAL": send_interval,
-        "DETECTED_TIMEZONE": timezone,
+        "DETECTED_TIMEZONE": tz_name,
     }
 
 # ============================================================
@@ -341,12 +341,16 @@ def load_buffer_from_disk():
             with open(BUFFER_FILE, 'r') as f:
                 buffered = json.load(f)
             if buffered:
-                log_message(f"📦 Loaded {len(buffered)} buffered readings from disk")
+                loaded_count = 0
                 for item in buffered:
                     try:
                         send_queue.put_nowait(item)
+                        loaded_count += 1
                     except queue.Full:
+                        dropped = len(buffered) - loaded_count
+                        log_message(f"⚠️ Queue full, dropped {dropped} old readings")
                         break
+                log_message(f"📦 Loaded {loaded_count} buffered readings from disk")
             os.remove(BUFFER_FILE)
     except Exception as e:
         log_message(f"⚠️ Could not load buffer: {e}")
@@ -527,6 +531,8 @@ def cleanup():
             log_message(f"⚠️ Error closing SPI: {e}")
 
 def main():
+    global running  # Need to modify global for signal to sender thread
+
     log_message(f"🔌 Power Monitor Starting - {LOCATION_NAME}")
     log_message("="*60)
     log_message(f"Device ID: {DEVICE_ID}")
@@ -542,6 +548,9 @@ def main():
 
     if not init_spi():
         log_message("❌ Cannot start without SPI. Check wiring.")
+        log_message("Shutting down...")
+        running = False  # Signal sender thread to stop
+        cleanup()
         return
 
     log_message("⚡ Fast mode: Background sending enabled")
