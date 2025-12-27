@@ -30,7 +30,6 @@ CT_RATING         = 30
 SEND_INTERVAL     = 1
 DETECTED_TIMEZONE = "UTC"
 
-CT_BURDEN_RESISTOR = 18.0
 CT_CALIBRATION     = 1.0
 DEFAULT_CALIBRATION = 0.88
 
@@ -243,11 +242,19 @@ def collect_all_ct_samples(num_samples: int):
 # Power calculations
 # ============================================================
 def volts_per_amp(rating: int):
-    if rating == 30: return 1.0/30
-    if rating == 50: return 1.0/50
-    if rating == 100: return 0.9/100
-    if rating == 200: return 1.0/200
-    return 1.0/float(rating)
+    """Return CT output voltage per amp based on CT rating.
+
+    Most CTs output 1V at rated current, but some 100A CTs
+    output 0.9V at 100A (manufacturer variance).
+    """
+    CT_OUTPUT_VOLTAGE = {
+        30: 1.0,    # 30A CT outputs 1.0V at 30A
+        50: 1.0,    # 50A CT outputs 1.0V at 50A
+        100: 0.9,   # 100A CT outputs 0.9V at 100A (common variant)
+        200: 1.0,   # 200A CT outputs 1.0V at 200A
+    }
+    output_v = CT_OUTPUT_VOLTAGE.get(rating, 1.0)
+    return output_v / float(rating)
 
 def calculate_power_for_ct(samples, ct_num):
     """Calculate power from CT samples using RMS calculation"""
@@ -438,15 +445,26 @@ def background_sender():
             else:
                 consecutive_failures += 1
                 queue_was_full = True  # We have unsent data
-                # Re-queue failed data if server is down
+
+                # Re-queue failed data if server is down (limit retries to prevent infinite loop)
                 if consecutive_failures < 10:
                     try:
                         send_queue.put_nowait(data)
                     except queue.Full:
-                        pass
-                # Back off if many failures
+                        # Queue is full - log data loss
+                        log_message(f"⚠️ Buffer full, dropping reading from {data.get('timestamp', 'unknown')}")
+                else:
+                    # Too many failures - drop this reading to prevent infinite retry
+                    log_message(f"⚠️ Too many failures, dropping reading from {data.get('timestamp', 'unknown')}")
+
+                # Back off if many failures (use short sleeps to allow quick shutdown)
                 if consecutive_failures > 5:
-                    time.sleep(min(consecutive_failures, 30))
+                    backoff_time = min(consecutive_failures, 30)
+                    # Sleep in 1-second intervals to check for shutdown
+                    for _ in range(backoff_time):
+                        if not running:
+                            break
+                        time.sleep(1)
 
         except Exception as e:
             log_message(f"⚠️ Sender thread error: {e}")
@@ -466,7 +484,8 @@ def queue_for_sending(data):
 def start_sender_thread():
     """Start the background sender thread"""
     global sender_thread
-    sender_thread = threading.Thread(target=background_sender, daemon=True)
+    # Not a daemon thread - we want it to finish saving before exit
+    sender_thread = threading.Thread(target=background_sender, daemon=False)
     sender_thread.start()
     log_message("🚀 Background sender thread started")
 
@@ -577,7 +596,8 @@ def main():
             time.sleep(5)
 
     log_message("🛑 Power Monitor Service Stopped")
-    save_buffer_to_disk(drain_queue=True)
+    # Note: buffer is saved by background_sender() when it exits
+    # cleanup() waits for sender thread to finish
     cleanup()
 
 if __name__ == "__main__":
