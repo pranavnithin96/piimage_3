@@ -5,10 +5,18 @@ Raspberry Pi Power Monitor
 - Calculates RMS current and power
 - Sends JSON payloads to a server
 - First-time setup wizard -> /etc/powermonitor/config.conf
+- Features: Background HTTP, connection pooling, local buffering
 """
 
-import os, sys, json, time, math, signal, requests, spidev, pytz
+import os, sys, json, time, math, signal, spidev, pytz
+import threading
+import queue
 from datetime import datetime, timezone
+
+# Import requests with session support
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ============================================================
 # Defaults (used only if no config file exists)
@@ -35,6 +43,15 @@ NUM_SAMPLES       = 500
 # Globals
 spi = None
 running = True
+
+# ============================================================
+# Performance: Background sending with buffering
+# ============================================================
+BUFFER_FILE = "/var/log/powermonitor/buffer.json"
+MAX_BUFFER_SIZE = 1000  # Max readings to buffer locally
+send_queue = queue.Queue(maxsize=MAX_BUFFER_SIZE)
+http_session = None
+sender_thread = None
 
 # ============================================================
 # Setup Wizard
@@ -187,20 +204,137 @@ def calculate_all_ct_power(all_samples):
     return {ct: calculate_power_for_ct(all_samples.get(ct), ct) for ct in CT_CHANNELS}
 
 # ============================================================
-# Networking
+# Networking - Optimized with connection pooling & background sending
 # ============================================================
-def send_to_server(data, retries=2, timeout=5):
-    last_err = None
-    for _ in range(retries+1):
+def init_http_session():
+    """Initialize HTTP session with connection pooling for faster requests"""
+    global http_session
+    http_session = requests.Session()
+
+    # Configure retry strategy
+    retry_strategy = Retry(
+        total=2,
+        backoff_factor=0.1,
+        status_forcelist=[500, 502, 503, 504]
+    )
+
+    # Mount adapter with connection pooling
+    adapter = HTTPAdapter(
+        pool_connections=1,
+        pool_maxsize=5,
+        max_retries=retry_strategy
+    )
+    http_session.mount("https://", adapter)
+    http_session.mount("http://", adapter)
+
+    # Set default headers
+    http_session.headers.update({
+        'Content-Type': 'application/json',
+        'Connection': 'keep-alive'
+    })
+
+    log_message("✅ HTTP session initialized with connection pooling")
+    return http_session
+
+def load_buffer_from_disk():
+    """Load any buffered data from disk (from previous offline period)"""
+    try:
+        if os.path.exists(BUFFER_FILE):
+            with open(BUFFER_FILE, 'r') as f:
+                buffered = json.load(f)
+            if buffered:
+                log_message(f"📦 Loaded {len(buffered)} buffered readings from disk")
+                for item in buffered:
+                    try:
+                        send_queue.put_nowait(item)
+                    except queue.Full:
+                        break
+            os.remove(BUFFER_FILE)
+    except Exception as e:
+        log_message(f"⚠️ Could not load buffer: {e}")
+
+def save_buffer_to_disk():
+    """Save pending queue items to disk for persistence"""
+    try:
+        items = []
+        while not send_queue.empty():
+            try:
+                items.append(send_queue.get_nowait())
+            except queue.Empty:
+                break
+        if items:
+            os.makedirs(os.path.dirname(BUFFER_FILE), exist_ok=True)
+            with open(BUFFER_FILE, 'w') as f:
+                json.dump(items, f)
+            log_message(f"💾 Saved {len(items)} readings to disk buffer")
+    except Exception as e:
+        log_message(f"⚠️ Could not save buffer: {e}")
+
+def send_to_server_direct(data, timeout=3):
+    """Direct HTTP send using session (faster due to connection reuse)"""
+    try:
+        r = http_session.post(SERVER_URL, json=data, timeout=timeout)
+        if r.status_code == 200:
+            return True, "Success"
+        return False, f"HTTP {r.status_code}"
+    except requests.exceptions.Timeout:
+        return False, "Timeout"
+    except requests.exceptions.ConnectionError:
+        return False, "Connection failed"
+    except Exception as e:
+        return False, f"Error: {str(e)[:50]}"
+
+def background_sender():
+    """Background thread that sends queued data to server"""
+    global running
+    consecutive_failures = 0
+
+    while running:
         try:
-            r = requests.post(SERVER_URL, json=data, timeout=timeout)
-            if r.status_code == 200: return True, "Success"
-            last_err = f"HTTP {r.status_code}"
-        except requests.exceptions.Timeout: last_err = "Timeout"
-        except requests.exceptions.ConnectionError: last_err = "Connection failed"
-        except Exception as e: last_err = f"Error: {str(e)[:80]}"
-        time.sleep(0.5)
-    return False, last_err or "Unknown error"
+            # Wait for data with timeout (allows clean shutdown)
+            try:
+                data = send_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            # Try to send
+            success, msg = send_to_server_direct(data)
+
+            if success:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                # Re-queue failed data if server is down
+                if consecutive_failures < 10:
+                    try:
+                        send_queue.put_nowait(data)
+                    except queue.Full:
+                        pass
+                # Back off if many failures
+                if consecutive_failures > 5:
+                    time.sleep(min(consecutive_failures, 30))
+
+        except Exception as e:
+            log_message(f"⚠️ Sender thread error: {e}")
+            time.sleep(1)
+
+    # Save remaining queue to disk on shutdown
+    save_buffer_to_disk()
+
+def queue_for_sending(data):
+    """Queue data for background sending (non-blocking)"""
+    try:
+        send_queue.put_nowait(data)
+        return True, f"Queued ({send_queue.qsize()} pending)"
+    except queue.Full:
+        return False, "Buffer full"
+
+def start_sender_thread():
+    """Start the background sender thread"""
+    global sender_thread
+    sender_thread = threading.Thread(target=background_sender, daemon=True)
+    sender_thread.start()
+    log_message("🚀 Background sender thread started")
 
 def format_ct_results_for_log(ct_results):
     active, total = [], 0.0
@@ -234,14 +368,24 @@ def main():
     log_message(f"Server: {SERVER_URL}")
     log_message("="*60)
 
+    # Initialize optimized networking
+    init_http_session()
+    load_buffer_from_disk()
+    start_sender_thread()
+
     if not init_spi():
         log_message("❌ Cannot start without SPI. Check wiring.")
         return
 
+    log_message("⚡ Fast mode: Background sending enabled")
+
     while running:
         try:
+            loop_start = time.time()
+
             samples = collect_all_ct_samples(NUM_SAMPLES)
             results = calculate_all_ct_power(samples)
+
             if any(res for res in results.values()):
                 payload = {
                     "device_id": DEVICE_ID,
@@ -262,12 +406,22 @@ def main():
                         payload["readings"]["cts"][f"ct_{ct}"] = {
                             "real_power_w":0.0,"amps":0.0,"pf":0.0
                         }
-                ok,msg = send_to_server(payload)
-                status = "✅" if ok else "❌"
-                log_message(f"{status} {format_ct_results_for_log(results)} | {msg}")
+
+                # Non-blocking queue instead of blocking HTTP call
+                ok, msg = queue_for_sending(payload)
+                status = "✅" if ok else "⚠️"
+
+                loop_time = (time.time() - loop_start) * 1000
+                log_message(f"{status} {format_ct_results_for_log(results)} | {msg} | {loop_time:.0f}ms")
             else:
                 log_message("❌ No valid readings from CTs")
-            time.sleep(SEND_INTERVAL)
+
+            # Sleep remaining time to maintain interval
+            elapsed = time.time() - loop_start
+            sleep_time = max(0, SEND_INTERVAL - elapsed)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
         except KeyboardInterrupt:
             break
         except Exception as e:
@@ -275,6 +429,7 @@ def main():
             time.sleep(5)
 
     log_message("🛑 Power Monitor Service Stopped")
+    save_buffer_to_disk()
 
 if __name__ == "__main__":
     main()
