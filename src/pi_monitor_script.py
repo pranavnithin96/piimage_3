@@ -49,9 +49,11 @@ running = True
 # ============================================================
 BUFFER_FILE = "/var/log/powermonitor/buffer.json"
 MAX_BUFFER_SIZE = 1000  # Max readings to buffer locally
+BUFFER_SAVE_INTERVAL = 300  # Save buffer to disk every 5 minutes
 send_queue = queue.Queue(maxsize=MAX_BUFFER_SIZE)
 http_session = None
 sender_thread = None
+last_buffer_save = 0  # Track last periodic save time
 
 # ============================================================
 # Setup Wizard
@@ -253,22 +255,46 @@ def load_buffer_from_disk():
     except Exception as e:
         log_message(f"⚠️ Could not load buffer: {e}")
 
-def save_buffer_to_disk():
-    """Save pending queue items to disk for persistence"""
+def save_buffer_to_disk(drain_queue=True):
+    """Save pending queue items to disk for persistence
+
+    Args:
+        drain_queue: If True, empties the queue (for shutdown)
+                     If False, copies items back to queue (for periodic save)
+    """
     try:
         items = []
+        # Get all items from queue
         while not send_queue.empty():
             try:
                 items.append(send_queue.get_nowait())
             except queue.Empty:
                 break
+
         if items:
             os.makedirs(os.path.dirname(BUFFER_FILE), exist_ok=True)
             with open(BUFFER_FILE, 'w') as f:
                 json.dump(items, f)
             log_message(f"💾 Saved {len(items)} readings to disk buffer")
+
+            # If not draining, put items back in queue
+            if not drain_queue:
+                for item in items:
+                    try:
+                        send_queue.put_nowait(item)
+                    except queue.Full:
+                        break
     except Exception as e:
         log_message(f"⚠️ Could not save buffer: {e}")
+
+def clear_buffer_file():
+    """Delete buffer file when queue is empty and all data sent"""
+    try:
+        if os.path.exists(BUFFER_FILE):
+            os.remove(BUFFER_FILE)
+            log_message("🗑️ Buffer file cleared - all data sent successfully")
+    except Exception as e:
+        log_message(f"⚠️ Could not clear buffer file: {e}")
 
 def send_to_server_direct(data, timeout=3):
     """Direct HTTP send using session (faster due to connection reuse)"""
@@ -286,15 +312,30 @@ def send_to_server_direct(data, timeout=3):
 
 def background_sender():
     """Background thread that sends queued data to server"""
-    global running
+    global running, last_buffer_save
     consecutive_failures = 0
+    last_buffer_save = time.time()
+    queue_was_full = False  # Track if we had buffered data
 
     while running:
         try:
+            current_time = time.time()
+
+            # Periodic buffer save (every 5 minutes) - protects against power loss
+            if current_time - last_buffer_save > BUFFER_SAVE_INTERVAL:
+                if not send_queue.empty():
+                    save_buffer_to_disk(drain_queue=False)  # Save but keep in queue
+                    queue_was_full = True
+                last_buffer_save = current_time
+
             # Wait for data with timeout (allows clean shutdown)
             try:
                 data = send_queue.get(timeout=1.0)
             except queue.Empty:
+                # Queue is empty - clear disk buffer if we had data before
+                if queue_was_full:
+                    clear_buffer_file()
+                    queue_was_full = False
                 continue
 
             # Try to send
@@ -302,8 +343,12 @@ def background_sender():
 
             if success:
                 consecutive_failures = 0
+                # Mark that we're processing buffered data
+                if send_queue.qsize() > 0:
+                    queue_was_full = True
             else:
                 consecutive_failures += 1
+                queue_was_full = True  # We have unsent data
                 # Re-queue failed data if server is down
                 if consecutive_failures < 10:
                     try:
@@ -319,7 +364,7 @@ def background_sender():
             time.sleep(1)
 
     # Save remaining queue to disk on shutdown
-    save_buffer_to_disk()
+    save_buffer_to_disk(drain_queue=True)
 
 def queue_for_sending(data):
     """Queue data for background sending (non-blocking)"""
