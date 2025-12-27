@@ -49,6 +49,7 @@ BUFFER_FILE = "/var/log/powermonitor/buffer.json"
 MAX_BUFFER_SIZE = 1000  # Max readings to buffer locally
 BUFFER_SAVE_INTERVAL = 300  # Save buffer to disk every 5 minutes
 send_queue = queue.Queue(maxsize=MAX_BUFFER_SIZE)
+buffer_lock = threading.Lock()  # Protects buffer save/load operations
 http_session = None
 sender_thread = None
 last_buffer_save = 0  # Track last periodic save time
@@ -56,7 +57,19 @@ last_buffer_save = 0  # Track last periodic save time
 # ============================================================
 # Setup Wizard
 # ============================================================
+def has_terminal():
+    """Check if we have an interactive terminal (TTY)"""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
 def first_time_setup():
+    """Interactive setup wizard - only works with TTY"""
+    if not has_terminal():
+        # Running as service without terminal - can't do interactive setup
+        print("❌ No config file found and no terminal for setup wizard.")
+        print(f"   Please create {CONFIG_PATH} manually or run interactively first.")
+        print("   Using default values for now...")
+        return None  # Signal that we should use defaults
+
     print("=== Power Monitor First-Time Setup ===")
     device_id   = input(f"Device ID [{DEVICE_ID}]: ").strip() or DEVICE_ID
     location    = input(f"Location name [{LOCATION_NAME}]: ").strip() or LOCATION_NAME
@@ -66,17 +79,24 @@ def first_time_setup():
     send_interval = input(f"Send interval (s) [{SEND_INTERVAL}]: ").strip() or str(SEND_INTERVAL)
     tz_name     = input(f"Timezone (IANA) [{DETECTED_TIMEZONE}]: ").strip() or DETECTED_TIMEZONE
 
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        f.write(f"DEVICE_ID={device_id}\n")
-        f.write(f"LOCATION_NAME={location}\n")
-        f.write(f"SERVER_URL={server_url}\n")
-        f.write(f"GRID_VOLTAGE={grid_voltage}\n")
-        f.write(f"CT_RATING={ct_rating}\n")
-        f.write(f"SEND_INTERVAL={send_interval}\n")
-        f.write(f"DETECTED_TIMEZONE={tz_name}\n")
+    # Try to save config (may fail if no permissions)
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            f.write(f"DEVICE_ID={device_id}\n")
+            f.write(f"LOCATION_NAME={location}\n")
+            f.write(f"SERVER_URL={server_url}\n")
+            f.write(f"GRID_VOLTAGE={grid_voltage}\n")
+            f.write(f"CT_RATING={ct_rating}\n")
+            f.write(f"SEND_INTERVAL={send_interval}\n")
+            f.write(f"DETECTED_TIMEZONE={tz_name}\n")
+        print(f"\n✅ Config saved to {CONFIG_PATH}")
+    except PermissionError:
+        print(f"\n⚠️ Could not save config (permission denied). Run with sudo or as root.")
+        print("   Continuing with entered values for this session only.")
+    except Exception as e:
+        print(f"\n⚠️ Could not save config: {e}")
 
-    print(f"\n✅ Config saved to {CONFIG_PATH}")
     return {
         "DEVICE_ID": device_id,
         "LOCATION_NAME": location,
@@ -91,17 +111,32 @@ def first_time_setup():
 # Config Loader
 # ============================================================
 def load_config():
+    """Load config from file, run setup wizard if needed, or use defaults"""
     if not os.path.exists(CONFIG_PATH):
-        return first_time_setup()
+        result = first_time_setup()
+        if result is None:
+            # No TTY and no config - return empty dict (will use defaults)
+            return {}
+        return result
+
+    # Config file exists - try to read it
     cfg = {}
-    with open(CONFIG_PATH) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                k, v = line.split("=", 1)
-                cfg[k.strip()] = v.strip()
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    except PermissionError:
+        print(f"⚠️ Cannot read config file (permission denied): {CONFIG_PATH}")
+        print("   Using default values.")
+    except Exception as e:
+        print(f"⚠️ Error reading config file: {e}")
+        print("   Using default values.")
+
     return cfg
 
 def validate_config(cfg):
@@ -158,15 +193,26 @@ def validate_config(cfg):
         "DETECTED_TIMEZONE": cfg.get("DETECTED_TIMEZONE", DETECTED_TIMEZONE)
     }
 
-cfg = load_config()
-validated = validate_config(cfg)
-DEVICE_ID         = validated["DEVICE_ID"]
-LOCATION_NAME     = validated["LOCATION_NAME"]
-SERVER_URL        = validated["SERVER_URL"]
-GRID_VOLTAGE      = validated["GRID_VOLTAGE"]
-CT_RATING         = validated["CT_RATING"]
-SEND_INTERVAL     = validated["SEND_INTERVAL"]
-DETECTED_TIMEZONE = validated["DETECTED_TIMEZONE"]
+# Config will be loaded in main() to avoid issues when running as service
+# These remain as defaults until load_and_apply_config() is called
+_config_loaded = False
+
+def load_and_apply_config():
+    """Load config and update global variables. Called from main()."""
+    global DEVICE_ID, LOCATION_NAME, SERVER_URL, GRID_VOLTAGE
+    global CT_RATING, SEND_INTERVAL, DETECTED_TIMEZONE, _config_loaded
+
+    cfg = load_config()
+    validated = validate_config(cfg)
+
+    DEVICE_ID         = validated["DEVICE_ID"]
+    LOCATION_NAME     = validated["LOCATION_NAME"]
+    SERVER_URL        = validated["SERVER_URL"]
+    GRID_VOLTAGE      = validated["GRID_VOLTAGE"]
+    CT_RATING         = validated["CT_RATING"]
+    SEND_INTERVAL     = validated["SEND_INTERVAL"]
+    DETECTED_TIMEZONE = validated["DETECTED_TIMEZONE"]
+    _config_loaded = True
 
 # ============================================================
 # Logging & time
@@ -336,24 +382,25 @@ def init_http_session():
 
 def load_buffer_from_disk():
     """Load any buffered data from disk (from previous offline period)"""
-    try:
-        if os.path.exists(BUFFER_FILE):
-            with open(BUFFER_FILE, 'r') as f:
-                buffered = json.load(f)
-            if buffered:
-                loaded_count = 0
-                for item in buffered:
-                    try:
-                        send_queue.put_nowait(item)
-                        loaded_count += 1
-                    except queue.Full:
-                        dropped = len(buffered) - loaded_count
-                        log_message(f"⚠️ Queue full, dropped {dropped} old readings")
-                        break
-                log_message(f"📦 Loaded {loaded_count} buffered readings from disk")
-            os.remove(BUFFER_FILE)
-    except Exception as e:
-        log_message(f"⚠️ Could not load buffer: {e}")
+    with buffer_lock:
+        try:
+            if os.path.exists(BUFFER_FILE):
+                with open(BUFFER_FILE, 'r') as f:
+                    buffered = json.load(f)
+                if buffered:
+                    loaded_count = 0
+                    for item in buffered:
+                        try:
+                            send_queue.put_nowait(item)
+                            loaded_count += 1
+                        except queue.Full:
+                            dropped = len(buffered) - loaded_count
+                            log_message(f"⚠️ Queue full, dropped {dropped} old readings")
+                            break
+                    log_message(f"📦 Loaded {loaded_count} buffered readings from disk")
+                os.remove(BUFFER_FILE)
+        except Exception as e:
+            log_message(f"⚠️ Could not load buffer: {e}")
 
 def save_buffer_to_disk(drain_queue=True):
     """Save pending queue items to disk for persistence
@@ -362,39 +409,41 @@ def save_buffer_to_disk(drain_queue=True):
         drain_queue: If True, empties the queue (for shutdown)
                      If False, copies items back to queue (for periodic save)
     """
-    try:
-        items = []
-        # Get all items from queue
-        while not send_queue.empty():
-            try:
-                items.append(send_queue.get_nowait())
-            except queue.Empty:
-                break
+    with buffer_lock:
+        try:
+            items = []
+            # Get all items from queue
+            while not send_queue.empty():
+                try:
+                    items.append(send_queue.get_nowait())
+                except queue.Empty:
+                    break
 
-        if items:
-            os.makedirs(os.path.dirname(BUFFER_FILE), exist_ok=True)
-            with open(BUFFER_FILE, 'w') as f:
-                json.dump(items, f)
-            log_message(f"💾 Saved {len(items)} readings to disk buffer")
+            if items:
+                os.makedirs(os.path.dirname(BUFFER_FILE), exist_ok=True)
+                with open(BUFFER_FILE, 'w') as f:
+                    json.dump(items, f)
+                log_message(f"💾 Saved {len(items)} readings to disk buffer")
 
-            # If not draining, put items back in queue
-            if not drain_queue:
-                for item in items:
-                    try:
-                        send_queue.put_nowait(item)
-                    except queue.Full:
-                        break
-    except Exception as e:
-        log_message(f"⚠️ Could not save buffer: {e}")
+                # If not draining, put items back in queue
+                if not drain_queue:
+                    for item in items:
+                        try:
+                            send_queue.put_nowait(item)
+                        except queue.Full:
+                            break
+        except Exception as e:
+            log_message(f"⚠️ Could not save buffer: {e}")
 
 def clear_buffer_file():
     """Delete buffer file when queue is empty and all data sent"""
-    try:
-        if os.path.exists(BUFFER_FILE):
-            os.remove(BUFFER_FILE)
-            log_message("🗑️ Buffer file cleared - all data sent successfully")
-    except Exception as e:
-        log_message(f"⚠️ Could not clear buffer file: {e}")
+    with buffer_lock:
+        try:
+            if os.path.exists(BUFFER_FILE):
+                os.remove(BUFFER_FILE)
+                log_message("🗑️ Buffer file cleared - all data sent successfully")
+        except Exception as e:
+            log_message(f"⚠️ Could not clear buffer file: {e}")
 
 def send_to_server_direct(data, timeout=3):
     """Direct HTTP send using session (faster due to connection reuse)"""
@@ -460,6 +509,8 @@ def background_sender():
                 else:
                     # Too many failures - drop this reading to prevent infinite retry
                     log_message(f"⚠️ Too many failures, dropping reading from {data.get('timestamp', 'unknown')}")
+                    # Reset counter so next reading gets a fresh chance
+                    consecutive_failures = 0
 
                 # Back off if many failures (use short sleeps to allow quick shutdown)
                 if consecutive_failures > 5:
@@ -532,6 +583,9 @@ def cleanup():
 
 def main():
     global running  # Need to modify global for signal to sender thread
+
+    # Load config first (before any logging that uses config values)
+    load_and_apply_config()
 
     log_message(f"🔌 Power Monitor Starting - {LOCATION_NAME}")
     log_message("="*60)
