@@ -30,8 +30,10 @@ CT_RATING         = 30
 SEND_INTERVAL     = 1
 DETECTED_TIMEZONE = "UTC"
 
-CT_CALIBRATION     = 1.0
-DEFAULT_CALIBRATION = 0.88
+# Hardware constants (from schematic)
+BURDEN_RESISTOR    = 22       # Ohms - R1-R8 on PCB
+CT_TURNS_RATIO     = 2000     # Typical CT turns ratio
+ADC_VREF           = 3.3      # ADC reference voltage
 
 CT_CHANNELS       = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
 FREQUENCY         = 60
@@ -295,20 +297,16 @@ def collect_all_ct_samples(num_samples: int):
 # ============================================================
 # Power calculations
 # ============================================================
-def volts_per_amp(rating: int):
-    """Return CT output voltage per amp based on CT rating.
+def volts_per_amp():
+    """Return CT output voltage per amp based on hardware.
 
-    Most CTs output 1V at rated current, but some 100A CTs
-    output 0.9V at 100A (manufacturer variance).
+    For current-output CTs with external burden resistor:
+    V/A = burden_resistance / turns_ratio
+
+    With 22Ω burden and 2000:1 ratio: 22/2000 = 0.011 V/A
+    This is constant regardless of CT current rating.
     """
-    CT_OUTPUT_VOLTAGE = {
-        30: 1.0,    # 30A CT outputs 1.0V at 30A
-        50: 1.0,    # 50A CT outputs 1.0V at 50A
-        100: 0.9,   # 100A CT outputs 0.9V at 100A (common variant)
-        200: 1.0,   # 200A CT outputs 1.0V at 200A
-    }
-    output_v = CT_OUTPUT_VOLTAGE.get(rating, 1.0)
-    return output_v / float(rating)
+    return BURDEN_RESISTOR / CT_TURNS_RATIO
 
 def calculate_power_for_ct(samples, ct_num):
     """Calculate power from CT samples using RMS calculation"""
@@ -316,8 +314,11 @@ def calculate_power_for_ct(samples, ct_num):
         return None
 
     num = len(samples)
-    v_per_code = 3.31 / ADC_MAX_CODE
-    scaling = (v_per_code * CT_CALIBRATION * DEFAULT_CALIBRATION) / volts_per_amp(CT_RATING)
+
+    # Convert ADC codes to current
+    # ADC code → voltage → current
+    v_per_code = ADC_VREF / ADC_MAX_CODE           # ~0.00323 V/code
+    scaling = v_per_code / volts_per_amp()          # codes to amps
 
     # Calculate RMS current using standard deviation method
     # RMS = sqrt(mean(x²) - mean(x)²) for AC signals centered around DC offset
