@@ -8,37 +8,24 @@ echo "🌐 Checking network connection..."
 if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
     echo "❌ No internet connection detected"
     echo ""
-    echo "Options:"
-    echo "  [w] - Set up WiFi"
-    echo "  [s] - Skip (if using ethernet or already connected)"
-    echo "  [q] - Quit installation"
-    echo ""
-    read -n 1 -r -p "Choice: " net_choice
-    echo ""
+    read -p "Do you need help connecting to WiFi? (y/N): " need_wifi
 
-    case $net_choice in
-        w|W|"")
-            if [ -f "scripts/wifi_setup.sh" ]; then
-                bash scripts/wifi_setup.sh
-                # Check if connection succeeded
-                if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-                    echo "❌ Still no internet connection. Installation requires internet."
-                    echo "   Please connect manually and run install.sh again."
-                    exit 1
-                fi
-            else
-                echo "⚠️  WiFi setup script not found. Please connect manually."
+    if [[ "$need_wifi" =~ ^[Yy]$ ]]; then
+        if [ -f "scripts/wifi_setup.sh" ]; then
+            bash scripts/wifi_setup.sh
+            # Check if connection succeeded
+            if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+                echo "❌ Still no internet connection. Installation requires internet."
+                echo "   Please connect manually and run install.sh again."
                 exit 1
             fi
-            ;;
-        s|S)
-            echo "⚠️  Skipping network check. Installation may fail without internet."
-            ;;
-        *)
-            echo "Installation cancelled."
-            exit 0
-            ;;
-    esac
+        else
+            echo "⚠️  WiFi setup script not found. Please connect manually."
+            exit 1
+        fi
+    else
+        echo "Continuing without network check..."
+    fi
 else
     echo "✅ Internet connection OK"
 fi
