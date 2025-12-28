@@ -1,6 +1,48 @@
 #!/bin/bash
 echo "🚀 PowerMonitor Complete Installation"
 echo "===================================="
+echo ""
+
+# Step 0: Check network connectivity and offer WiFi setup
+echo "🌐 Checking network connection..."
+if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+    echo "❌ No internet connection detected"
+    echo ""
+    echo "Options:"
+    echo "  [w] - Set up WiFi"
+    echo "  [s] - Skip (if using ethernet or already connected)"
+    echo "  [q] - Quit installation"
+    echo ""
+    read -n 1 -r -p "Choice: " net_choice
+    echo ""
+
+    case $net_choice in
+        w|W|"")
+            if [ -f "scripts/wifi_setup.sh" ]; then
+                bash scripts/wifi_setup.sh
+                # Check if connection succeeded
+                if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+                    echo "❌ Still no internet connection. Installation requires internet."
+                    echo "   Please connect manually and run install.sh again."
+                    exit 1
+                fi
+            else
+                echo "⚠️  WiFi setup script not found. Please connect manually."
+                exit 1
+            fi
+            ;;
+        s|S)
+            echo "⚠️  Skipping network check. Installation may fail without internet."
+            ;;
+        *)
+            echo "Installation cancelled."
+            exit 0
+            ;;
+    esac
+else
+    echo "✅ Internet connection OK"
+fi
+echo ""
 
 # Copy the enhanced setup to current directory if needed
 if [ -f "src/turnkey_setup_interactive.py" ]; then
@@ -71,14 +113,15 @@ sudo chown pi:pi /opt/powermonitor/pi_monitor_script.py
 # Step 5b: Update the auto-setup script for SSH login
 echo "🔑 Updating auto-setup for SSH login..."
 sudo cp scripts/auto_setup.sh /opt/powermonitor/auto_setup.sh
+sudo chmod +x /opt/powermonitor/auto_setup.sh
+
 echo "🔧 Installing interactive setup script..."
 sudo cp src/turnkey_setup_interactive.py /opt/powermonitor/turnkey_setup_interactive.py
 sudo chmod +x /opt/powermonitor/turnkey_setup_interactive.py
 
-# Note: Lines 48-96 from original deploy_enhanced.sh were malformed and have been removed
-# The auto_setup.sh is correctly copied from scripts folder above
-
-sudo chmod +x /opt/powermonitor/auto_setup.sh
+echo "📶 Installing WiFi setup script..."
+sudo cp scripts/wifi_setup.sh /opt/powermonitor/wifi_setup.sh
+sudo chmod +x /opt/powermonitor/wifi_setup.sh
 
 # Step 6: Update bashrc if needed
 if ! grep -q "auto_setup.sh" ~/.bashrc; then
