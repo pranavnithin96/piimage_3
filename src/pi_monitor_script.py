@@ -339,8 +339,11 @@ def calculate_power_for_ct(samples, ct_num):
     # Calculate real power (W) = V × I × PF
     power = GRID_VOLTAGE * current_rms * pf
 
-    # Filter out noise floor (readings below 1W are likely noise)
-    if power < 1.0:
+    # Filter out noise floor
+    # With 22Ω burden and 2000:1 CT, ADC noise shows as ~15W when no CT connected
+    # Set threshold above noise floor but below minimum useful reading
+    NOISE_THRESHOLD_WATTS = 20.0
+    if power < NOISE_THRESHOLD_WATTS:
         power = 0.0
         current_rms = 0.0
         pf = 0.0
