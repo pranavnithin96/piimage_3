@@ -255,6 +255,14 @@ def init_spi():
         spi.max_speed_hz = 500_000
         log_message("✅ SPI initialized successfully")
         return True
+    except FileNotFoundError:
+        log_message("❌ SPI device not found!")
+        log_message("   → SPI may not be enabled. Run: sudo raspi-config → Interface Options → SPI → Enable")
+        return False
+    except PermissionError:
+        log_message("❌ SPI permission denied!")
+        log_message("   → Add user to spi group: sudo usermod -a -G spi $USER")
+        return False
     except Exception as e:
         log_message(f"❌ SPI initialization failed: {e}")
         return False
@@ -601,8 +609,16 @@ def main():
     start_sender_thread()
 
     if not init_spi():
-        log_message("❌ Cannot start without SPI. Check wiring.")
-        log_message("Shutting down...")
+        log_message("")
+        log_message("🔌 HARDWARE NOT CONNECTED OR SPI NOT ENABLED")
+        log_message("=" * 50)
+        log_message("Please check:")
+        log_message("  1. MCP3008 ADC is wired correctly to the Pi")
+        log_message("  2. SPI is enabled (sudo raspi-config)")
+        log_message("  3. CT sensors are connected to MCP3008")
+        log_message("")
+        log_message("Service will automatically retry in 10 seconds...")
+        log_message("=" * 50)
         running = False  # Signal sender thread to stop
         cleanup()
         return
