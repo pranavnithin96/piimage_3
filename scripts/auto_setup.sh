@@ -74,16 +74,13 @@ else
     echo "🆕 No configuration found"
     echo ""
 
-    # Check if WiFi is connected
-    if [ -z "$current_ssid" ]; then
-        read -p "Do you need help connecting to WiFi? (y/N): " need_wifi
+    read -p "Do you need help connecting to WiFi? (y/N): " need_wifi
 
-        if [[ "$need_wifi" =~ ^[Yy]$ ]]; then
-            if [ -f "/opt/powermonitor/wifi_setup.sh" ]; then
-                bash /opt/powermonitor/wifi_setup.sh
-            else
-                echo "❌ WiFi setup script not found"
-            fi
+    if [[ "$need_wifi" =~ ^[Yy]$ ]]; then
+        if [ -f "/opt/powermonitor/wifi_setup.sh" ]; then
+            bash /opt/powermonitor/wifi_setup.sh
+        else
+            echo "❌ WiFi setup script not found"
         fi
         echo ""
     fi

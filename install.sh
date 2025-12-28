@@ -3,31 +3,26 @@ echo "🚀 PowerMonitor Complete Installation"
 echo "===================================="
 echo ""
 
-# Step 0: Check network connectivity and offer WiFi setup
-echo "🌐 Checking network connection..."
-if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-    echo "❌ No internet connection detected"
-    echo ""
-    read -p "Do you need help connecting to WiFi? (y/N): " need_wifi
+# Step 0: Offer WiFi setup
+read -p "Do you need help connecting to WiFi? (y/N): " need_wifi
 
-    if [[ "$need_wifi" =~ ^[Yy]$ ]]; then
-        if [ -f "scripts/wifi_setup.sh" ]; then
-            bash scripts/wifi_setup.sh
-            # Check if connection succeeded
-            if ! ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
-                echo "❌ Still no internet connection. Installation requires internet."
-                echo "   Please connect manually and run install.sh again."
-                exit 1
-            fi
-        else
-            echo "⚠️  WiFi setup script not found. Please connect manually."
-            exit 1
-        fi
+if [[ "$need_wifi" =~ ^[Yy]$ ]]; then
+    if [ -f "scripts/wifi_setup.sh" ]; then
+        bash scripts/wifi_setup.sh
     else
-        echo "Continuing without network check..."
+        echo "⚠️  WiFi setup script not found."
     fi
-else
+fi
+
+# Check network connectivity
+echo ""
+echo "🌐 Checking network connection..."
+if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
     echo "✅ Internet connection OK"
+else
+    echo "❌ No internet connection. Installation requires internet."
+    echo "   Please connect and run install.sh again."
+    exit 1
 fi
 echo ""
 
