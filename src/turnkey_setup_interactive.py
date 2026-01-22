@@ -14,9 +14,10 @@ class PowerMonitorSetup:
             'DEVICE_ID': '',
             'LOCATION_NAME': '',
             'CT_RATING': '30',
-            'VOLTAGE': '120.0',
+            'GRID_VOLTAGE': '120.0',
             'SERVER_URL': 'https://linesights.com/api/data',
-            'TIMEZONE': 'America/New_York'
+            'DETECTED_TIMEZONE': 'America/New_York',
+            'SEND_INTERVAL': '1'
         }
         
         try:
@@ -39,6 +40,10 @@ class PowerMonitorSetup:
     def save_config(self, config):
         """Save configuration to file"""
         try:
+            # Ensure config directory exists
+            config_dir = os.path.dirname(self.config_file)
+            subprocess.run(['sudo', 'mkdir', '-p', config_dir], check=True)
+
             temp_config = "/tmp/powermonitor_config.conf"
             with open(temp_config, 'w') as f:
                 f.write("# Power Monitor Configuration - Updated\n")
@@ -46,11 +51,12 @@ class PowerMonitorSetup:
                 f.write("#\n")
                 for key, value in config.items():
                     f.write(f"{key}={value}\n")
-            
+
             subprocess.run(['sudo', 'cp', temp_config, self.config_file], check=True)
             subprocess.run(['sudo', 'chown', 'pi:pi', self.config_file], check=True)
+            subprocess.run(['sudo', 'chmod', '644', self.config_file], check=True)
             os.remove(temp_config)
-            
+
             return True, "Configuration saved successfully!"
         except Exception as e:
             return False, f"Error saving config: {str(e)}"
@@ -61,13 +67,37 @@ def draw_header(stdscr, title):
     stdscr.addstr(0, (width - len(title)) // 2, title, curses.A_BOLD)
     stdscr.addstr(1, 0, "=" * width)
 
+def safe_index(options, value, default_idx=0):
+    """Get index of value in options, or return default_idx if not found"""
+    try:
+        return options.index(value)
+    except ValueError:
+        return default_idx
+
 def edit_config_screen(stdscr, setup, config):
     """Interactive configuration editor"""
     current_field = 0
-    fields = ['DEVICE_ID', 'LOCATION_NAME', 'CT_RATING', 'VOLTAGE', 'SERVER_URL']
-    
+    fields = ['DEVICE_ID', 'LOCATION_NAME', 'CT_RATING', 'GRID_VOLTAGE', 'SERVER_URL']
+
     ct_options = ['30', '50', '100', '200']
     voltage_options = ['110.0', '120.0', '230.0', '240.0']
+
+    # Normalize config values to match options format
+    # Handle CT_RATING variations (e.g., '30' vs 30)
+    if config['CT_RATING'] not in ct_options:
+        # Try to find closest match or default to '30'
+        config['CT_RATING'] = '30'
+    # Handle GRID_VOLTAGE variations (e.g., '120' vs '120.0')
+    if config['GRID_VOLTAGE'] not in voltage_options:
+        # Try adding .0 if it's a whole number
+        try:
+            normalized = f"{float(config['GRID_VOLTAGE']):.1f}"
+            if normalized in voltage_options:
+                config['GRID_VOLTAGE'] = normalized
+            else:
+                config['GRID_VOLTAGE'] = '120.0'
+        except (ValueError, TypeError):
+            config['GRID_VOLTAGE'] = '120.0'
     
     while True:
         stdscr.clear()
@@ -90,14 +120,14 @@ def edit_config_screen(stdscr, setup, config):
             elif field == 'CT_RATING':
                 stdscr.addstr(row + 2, 2, "CT Rating: ", attr)
                 stdscr.addstr(row + 2, 17, f"{config[field]}A (←→ to change)", attr)
-            elif field == 'VOLTAGE':
+            elif field == 'GRID_VOLTAGE':
                 stdscr.addstr(row + 3, 2, "Voltage: ", attr)
                 stdscr.addstr(row + 3, 17, f"{config[field]}V (←→ to change)", attr)
             elif field == 'SERVER_URL':
                 stdscr.addstr(row + 4, 2, "Server URL: ", attr)
                 stdscr.addstr(row + 4, 17, config[field], attr)
         
-        stdscr.addstr(row + 6, 2, f"Timezone: {config['TIMEZONE']}", curses.A_DIM)
+        stdscr.addstr(row + 6, 2, f"Timezone: {config['DETECTED_TIMEZONE']}", curses.A_DIM)
         stdscr.refresh()
         
         key = stdscr.getch()
@@ -110,16 +140,16 @@ def edit_config_screen(stdscr, setup, config):
             if fields[current_field] == 'CT_RATING':
                 current_idx = ct_options.index(config['CT_RATING'])
                 config['CT_RATING'] = ct_options[(current_idx - 1) % len(ct_options)]
-            elif fields[current_field] == 'VOLTAGE':
-                current_idx = voltage_options.index(config['VOLTAGE'])
-                config['VOLTAGE'] = voltage_options[(current_idx - 1) % len(voltage_options)]
+            elif fields[current_field] == 'GRID_VOLTAGE':
+                current_idx = voltage_options.index(config['GRID_VOLTAGE'])
+                config['GRID_VOLTAGE'] = voltage_options[(current_idx - 1) % len(voltage_options)]
         elif key == curses.KEY_RIGHT:
             if fields[current_field] == 'CT_RATING':
                 current_idx = ct_options.index(config['CT_RATING'])
                 config['CT_RATING'] = ct_options[(current_idx + 1) % len(ct_options)]
-            elif fields[current_field] == 'VOLTAGE':
-                current_idx = voltage_options.index(config['VOLTAGE'])
-                config['VOLTAGE'] = voltage_options[(current_idx + 1) % len(voltage_options)]
+            elif fields[current_field] == 'GRID_VOLTAGE':
+                current_idx = voltage_options.index(config['GRID_VOLTAGE'])
+                config['GRID_VOLTAGE'] = voltage_options[(current_idx + 1) % len(voltage_options)]
         elif key == ord('\n') or key == ord('\r'):
             field = fields[current_field]
             if field in ['DEVICE_ID', 'LOCATION_NAME', 'SERVER_URL']:
@@ -143,18 +173,19 @@ def edit_config_screen(stdscr, setup, config):
 def main_setup_flow(stdscr):
     """Main setup flow"""
     setup = PowerMonitorSetup()
-    
-    # Load existing configuration
+
+    # Load existing configuration or use defaults for new setup
     config, config_exists = setup.load_existing_config()
-    
+
     if not config_exists:
+        # Show message that we're creating new config
         stdscr.clear()
-        stdscr.addstr(0, 2, "No configuration found!", curses.A_BOLD)
-        stdscr.addstr(2, 2, "Press any key to exit...")
+        stdscr.addstr(0, 2, "No configuration found - creating new setup!", curses.A_BOLD)
+        stdscr.addstr(2, 2, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
-        return
-    
+        # config already has defaults from load_existing_config()
+
     # Show current config and edit
     result, action = edit_config_screen(stdscr, setup, config)
     

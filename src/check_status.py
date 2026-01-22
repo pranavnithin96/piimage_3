@@ -47,16 +47,16 @@ def check_enhanced_status():
                 config_data[key] = value
         
         # Display key info
-        for key in ['DEVICE_ID', 'LOCATION_NAME', 'TIMEZONE', 'VOLTAGE', 'CT_RATING']:
+        for key in ['DEVICE_ID', 'LOCATION_NAME', 'DETECTED_TIMEZONE', 'GRID_VOLTAGE', 'CT_RATING', 'SEND_INTERVAL']:
             if key in config_data:
-                icon = {'DEVICE_ID': '📱', 'LOCATION_NAME': '📍', 'TIMEZONE': '🕐', 
-                       'VOLTAGE': '⚡', 'CT_RATING': '🔌'}.get(key, '•')
+                icon = {'DEVICE_ID': '📱', 'LOCATION_NAME': '📍', 'DETECTED_TIMEZONE': '🕐',
+                       'GRID_VOLTAGE': '⚡', 'CT_RATING': '🔌', 'SEND_INTERVAL': '⏱️'}.get(key, '•')
                 print(f"  {icon} {key}: {config_data[key]}")
-        
+
         # Show local time in detected timezone
-        if 'TIMEZONE' in config_data:
+        if 'DETECTED_TIMEZONE' in config_data:
             try:
-                tz = pytz.timezone(config_data['TIMEZONE'])
+                tz = pytz.timezone(config_data['DETECTED_TIMEZONE'])
                 local_time = datetime.now(tz)
                 print(f"  🕐 Local Time: {local_time.strftime('%H:%M:%S %Z')}")
             except:

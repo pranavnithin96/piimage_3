@@ -1,6 +1,30 @@
 #!/bin/bash
 echo "🚀 PowerMonitor Complete Installation"
 echo "===================================="
+echo ""
+
+# Step 0: Offer WiFi setup
+read -p "Do you need help connecting to WiFi? (y/N): " need_wifi
+
+if [[ "$need_wifi" =~ ^[Yy]$ ]]; then
+    if [ -f "scripts/wifi_setup.sh" ]; then
+        bash scripts/wifi_setup.sh
+    else
+        echo "⚠️  WiFi setup script not found."
+    fi
+fi
+
+# Check network connectivity
+echo ""
+echo "🌐 Checking network connection..."
+if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+    echo "✅ Internet connection OK"
+else
+    echo "❌ No internet connection. Installation requires internet."
+    echo "   Please connect and run install.sh again."
+    exit 1
+fi
+echo ""
 
 # Copy the enhanced setup to current directory if needed
 if [ -f "src/turnkey_setup_interactive.py" ]; then
@@ -71,14 +95,15 @@ sudo chown pi:pi /opt/powermonitor/pi_monitor_script.py
 # Step 5b: Update the auto-setup script for SSH login
 echo "🔑 Updating auto-setup for SSH login..."
 sudo cp scripts/auto_setup.sh /opt/powermonitor/auto_setup.sh
+sudo chmod +x /opt/powermonitor/auto_setup.sh
+
 echo "🔧 Installing interactive setup script..."
 sudo cp src/turnkey_setup_interactive.py /opt/powermonitor/turnkey_setup_interactive.py
 sudo chmod +x /opt/powermonitor/turnkey_setup_interactive.py
 
-# Note: Lines 48-96 from original deploy_enhanced.sh were malformed and have been removed
-# The auto_setup.sh is correctly copied from scripts folder above
-
-sudo chmod +x /opt/powermonitor/auto_setup.sh
+echo "📶 Installing WiFi setup script..."
+sudo cp scripts/wifi_setup.sh /opt/powermonitor/wifi_setup.sh
+sudo chmod +x /opt/powermonitor/wifi_setup.sh
 
 # Step 6: Update bashrc if needed
 if ! grep -q "auto_setup.sh" ~/.bashrc; then
@@ -142,16 +167,16 @@ def check_enhanced_status():
                 config_data[key] = value
         
         # Display key info
-        for key in ['DEVICE_ID', 'LOCATION_NAME', 'TIMEZONE', 'VOLTAGE', 'CT_RATING']:
+        for key in ['DEVICE_ID', 'LOCATION_NAME', 'DETECTED_TIMEZONE', 'GRID_VOLTAGE', 'CT_RATING', 'SEND_INTERVAL']:
             if key in config_data:
-                icon = {'DEVICE_ID': '📱', 'LOCATION_NAME': '📍', 'TIMEZONE': '🕐', 
-                       'VOLTAGE': '⚡', 'CT_RATING': '🔌'}.get(key, '•')
+                icon = {'DEVICE_ID': '📱', 'LOCATION_NAME': '📍', 'DETECTED_TIMEZONE': '🕐',
+                       'GRID_VOLTAGE': '⚡', 'CT_RATING': '🔌', 'SEND_INTERVAL': '⏱️'}.get(key, '•')
                 print(f"  {icon} {key}: {config_data[key]}")
-        
+
         # Show local time in detected timezone
-        if 'TIMEZONE' in config_data:
+        if 'DETECTED_TIMEZONE' in config_data:
             try:
-                tz = pytz.timezone(config_data['TIMEZONE'])
+                tz = pytz.timezone(config_data['DETECTED_TIMEZONE'])
                 local_time = datetime.now(tz)
                 print(f"  🕐 Local Time: {local_time.strftime('%H:%M:%S %Z')}")
             except:
@@ -172,84 +197,7 @@ EOF
 
 sudo chmod +x /opt/powermonitor/check_status.py
 
-# Step 8: Create enhanced SD card preparation script
-echo "💾 Creating enhanced SD card preparation script..."
-sudo tee /opt/powermonitor/prepare_sd_card.sh > /dev/null << 'EOF'
-#!/bin/bash
-
-# Enhanced SD Card Preparation Script
-echo "🔌 Preparing Enhanced SD Card for Deployment"
-echo "============================================"
-
-# Remove setup complete marker
-if [ -f "/opt/powermonitor/.setup_complete" ]; then
-    sudo rm /opt/powermonitor/.setup_complete
-    echo "✅ Removed setup completion marker"
-fi
-
-# Remove any existing config
-if [ -f "/etc/powermonitor/config.conf" ]; then
-    sudo rm /etc/powermonitor/config.conf
-    echo "✅ Removed existing configuration"
-fi
-
-# Stop and disable service if running
-sudo systemctl stop powermonitor 2>/dev/null
-sudo systemctl disable powermonitor 2>/dev/null
-echo "✅ Stopped and disabled service"
-
-# Remove any existing power monitor script
-if [ -f "/opt/powermonitor/pi_monitor_script.py" ]; then
-    sudo rm /opt/powermonitor/pi_monitor_script.py
-    echo "✅ Removed existing monitor script"
-fi
-
-# Clean logs
-sudo rm -f /var/log/powermonitor/*
-sudo journalctl --rotate
-sudo journalctl --vacuum-time=1s
-echo "✅ Cleared log files"
-
-# Remove SSH host keys (will be regenerated on first boot)
-sudo rm -f /etc/ssh/ssh_host_*
-echo "✅ Removed SSH host keys (will regenerate)"
-
-# Clear bash history
-history -c
-> ~/.bash_history
-echo "✅ Cleared bash history"
-
-# Remove any temporary files
-sudo rm -f /tmp/powermonitor*
-echo "✅ Cleaned temporary files"
-
-echo ""
-echo "🎯 Enhanced SD Card is ready for imaging!"
-echo ""
-echo "Features in this image:"
-echo "  ✅ Custom device naming"
-echo "  ✅ Automatic timezone detection" 
-echo "  ✅ 6-CT sensor monitoring"
-echo "  ✅ ISO 8601 UTC timestamps"
-echo "  ✅ Professional setup wizard"
-echo ""
-echo "Next steps:"
-echo "1. Shutdown: sudo shutdown -h now"
-echo "2. Create SD card image"
-echo "3. Flash to new cards for deployment"
-echo ""
-echo "Deployment experience:"
-echo "  • Flash image → Boot Pi → SSH in"
-echo "  • Setup wizard runs automatically"
-echo "  • User enters device name & location"
-echo "  • Timezone detected automatically"
-echo "  • Monitoring starts immediately"
-echo ""
-EOF
-
-sudo chmod +x /opt/powermonitor/prepare_sd_card.sh
-
-# Step 9: Set permissions
+# Step 8: Set permissions
 sudo chown -R pi:pi /opt/powermonitor
 sudo chown -R pi:pi /var/log/powermonitor
 sudo chown -R pi:pi /etc/powermonitor
@@ -276,35 +224,17 @@ else
 fi
 
 echo ""
-echo "✅ Enhanced Power Monitor Deployment Complete!"
-echo ""
-echo "🎯 What's installed:"
-echo "   • Enhanced setup wizard with custom device naming"
-echo "   • Automatic timezone detection and UTC timestamps"
-echo "   • Professional SSH login experience"
-echo "   • 6-CT sensor monitoring system"
-echo "   • ISO 8601 timestamp formatting"
-echo ""
-echo "🧪 Testing:"
-echo "   python3 /opt/powermonitor/turnkey_setup.py"
-echo ""
-echo "📊 Status check:"
-echo "   python3 /opt/powermonitor/check_status.py"
-echo ""
-echo "💾 Prepare for SD card imaging:"
-echo "   /opt/powermonitor/prepare_sd_card.sh"
-echo ""
-echo "🚀 Ready for professional deployment!"
-echo ""
-
-echo ""
 echo "✅ Installation complete!"
 echo "🔌 Your PowerMonitor system is now ready!"
 echo ""
 echo "📋 What was installed:"
-echo "  • Interactive setup framework"
-echo "  • Professional SSH interface"
-echo "  • Real-time monitoring engine"
-echo "  • Complete configuration system"
+echo "  • 6-CT sensor monitoring system"
+echo "  • Interactive configuration wizard"
+echo "  • Real-time power monitoring engine"
+echo "  • Background data buffering"
 echo ""
-echo "🚀 Next: SSH into this Pi and the setup wizard will run automatically!"
+echo "📊 Useful commands:"
+echo "  python3 /opt/powermonitor/check_status.py    # Check status"
+echo "  sudo systemctl status powermonitor           # Service status"
+echo "  journalctl -u powermonitor -f                # View logs"
+echo ""
