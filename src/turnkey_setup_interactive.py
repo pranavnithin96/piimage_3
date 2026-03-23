@@ -17,7 +17,8 @@ class PowerMonitorSetup:
             'GRID_VOLTAGE': '120.0',
             'SERVER_URL': 'https://linesights.com/api/data',
             'DETECTED_TIMEZONE': 'America/New_York',
-            'SEND_INTERVAL': '1'
+            'SEND_INTERVAL': '1',
+            'ACTIVE_CTS': '1,2,3,4,5,6'
         }
         
         try:
@@ -77,7 +78,7 @@ def safe_index(options, value, default_idx=0):
 def edit_config_screen(stdscr, setup, config):
     """Interactive configuration editor"""
     current_field = 0
-    fields = ['DEVICE_ID', 'LOCATION_NAME', 'CT_RATING', 'GRID_VOLTAGE', 'SERVER_URL']
+    fields = ['DEVICE_ID', 'LOCATION_NAME', 'CT_RATING', 'GRID_VOLTAGE', 'SERVER_URL', 'ACTIVE_CTS']
 
     ct_options = ['30', '50', '100', '200']
     voltage_options = ['110.0', '120.0', '230.0', '240.0']
@@ -126,8 +127,11 @@ def edit_config_screen(stdscr, setup, config):
             elif field == 'SERVER_URL':
                 stdscr.addstr(row + 4, 2, "Server URL: ", attr)
                 stdscr.addstr(row + 4, 17, config[field], attr)
-        
-        stdscr.addstr(row + 6, 2, f"Timezone: {config['DETECTED_TIMEZONE']}", curses.A_DIM)
+            elif field == 'ACTIVE_CTS':
+                stdscr.addstr(row + 5, 2, "Active CTs: ", attr)
+                stdscr.addstr(row + 5, 17, f"{config.get('ACTIVE_CTS', '1,2,3,4,5,6')} (ENTER to edit)", attr)
+
+        stdscr.addstr(row + 7, 2, f"Timezone: {config['DETECTED_TIMEZONE']}", curses.A_DIM)
         stdscr.refresh()
         
         key = stdscr.getch()
@@ -152,8 +156,11 @@ def edit_config_screen(stdscr, setup, config):
                 config['GRID_VOLTAGE'] = voltage_options[(current_idx + 1) % len(voltage_options)]
         elif key == ord('\n') or key == ord('\r'):
             field = fields[current_field]
-            if field in ['DEVICE_ID', 'LOCATION_NAME', 'SERVER_URL']:
-                stdscr.addstr(20, 2, f"Enter new {field.lower().replace('_', ' ')}: ")
+            if field in ['DEVICE_ID', 'LOCATION_NAME', 'SERVER_URL', 'ACTIVE_CTS']:
+                if field == 'ACTIVE_CTS':
+                    stdscr.addstr(20, 2, "Enter active CT channels (e.g. 1,2,3): ")
+                else:
+                    stdscr.addstr(20, 2, f"Enter new {field.lower().replace('_', ' ')}: ")
                 stdscr.refresh()
                 curses.echo()
                 new_value = stdscr.getstr().decode('utf-8').strip()
@@ -162,6 +169,10 @@ def edit_config_screen(stdscr, setup, config):
                     if field == 'DEVICE_ID':
                         # Clean device ID
                         new_value = ''.join(c for c in new_value if c.isalnum() or c in '_-').lower()
+                    elif field == 'ACTIVE_CTS':
+                        # Validate: keep only digits 1-6, comma-separated
+                        channels = [x.strip() for x in new_value.split(',') if x.strip().isdigit() and 1 <= int(x.strip()) <= 6]
+                        new_value = ','.join(channels) if channels else config.get('ACTIVE_CTS', '1,2,3,4,5,6')
                     config[field] = new_value
         elif key == 265:  # F1 - Save & Restart
             return config, "restart"

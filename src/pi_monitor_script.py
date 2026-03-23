@@ -29,6 +29,7 @@ GRID_VOLTAGE      = 120.0
 CT_RATING         = 30
 SEND_INTERVAL     = 1
 DETECTED_TIMEZONE = "UTC"
+ACTIVE_CTS        = "1,2,3,4,5,6"
 
 # Hardware constants (from schematic)
 BURDEN_RESISTOR    = 22       # Ohms - R1-R8 on PCB
@@ -38,7 +39,7 @@ ADC_VREF           = 3.3      # ADC reference voltage
 CT_CHANNELS       = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
 FREQUENCY         = 60
 ADC_MAX_CODE      = 1023.0
-NUM_SAMPLES       = 500
+NUM_SAMPLES       = 1200
 
 # Globals
 spi = None
@@ -80,6 +81,7 @@ def first_time_setup():
     ct_rating   = input(f"CT rating (A) [{CT_RATING}]: ").strip() or str(CT_RATING)
     send_interval = input(f"Send interval (s) [{SEND_INTERVAL}]: ").strip() or str(SEND_INTERVAL)
     tz_name     = input(f"Timezone (IANA) [{DETECTED_TIMEZONE}]: ").strip() or DETECTED_TIMEZONE
+    active_cts  = input(f"Active CT channels (comma-separated, 1-6) [{ACTIVE_CTS}]: ").strip() or ACTIVE_CTS
 
     # Try to save config (may fail if no permissions)
     try:
@@ -92,6 +94,7 @@ def first_time_setup():
             f.write(f"CT_RATING={ct_rating}\n")
             f.write(f"SEND_INTERVAL={send_interval}\n")
             f.write(f"DETECTED_TIMEZONE={tz_name}\n")
+            f.write(f"ACTIVE_CTS={active_cts}\n")
         print(f"\n✅ Config saved to {CONFIG_PATH}")
     except PermissionError:
         print(f"\n⚠️ Could not save config (permission denied). Run with sudo or as root.")
@@ -107,6 +110,7 @@ def first_time_setup():
         "CT_RATING": ct_rating,
         "SEND_INTERVAL": send_interval,
         "DETECTED_TIMEZONE": tz_name,
+        "ACTIVE_CTS": active_cts,
     }
 
 # ============================================================
@@ -181,6 +185,18 @@ def validate_config(cfg):
         errors.append(f"SERVER_URL must start with http:// or https://, using {SERVER_URL}")
         server = SERVER_URL
 
+    # Validate ACTIVE_CTS
+    active_cts_str = cfg.get("ACTIVE_CTS", ACTIVE_CTS)
+    try:
+        active_cts_list = [int(x.strip()) for x in active_cts_str.split(",") if x.strip()]
+        active_cts_list = [x for x in active_cts_list if 1 <= x <= 6]
+        if not active_cts_list:
+            errors.append(f"ACTIVE_CTS has no valid channels (1-6), using all")
+            active_cts_list = [1, 2, 3, 4, 5, 6]
+    except ValueError:
+        errors.append(f"ACTIVE_CTS invalid, using all channels")
+        active_cts_list = [1, 2, 3, 4, 5, 6]
+
     # Print any validation errors
     for error in errors:
         print(f"⚠️ Config warning: {error}")
@@ -192,7 +208,8 @@ def validate_config(cfg):
         "GRID_VOLTAGE": voltage,
         "CT_RATING": ct,
         "SEND_INTERVAL": interval,
-        "DETECTED_TIMEZONE": cfg.get("DETECTED_TIMEZONE", DETECTED_TIMEZONE)
+        "DETECTED_TIMEZONE": cfg.get("DETECTED_TIMEZONE", DETECTED_TIMEZONE),
+        "ACTIVE_CTS": active_cts_list
     }
 
 # Config will be loaded in main() to avoid issues when running as service
@@ -202,7 +219,7 @@ _config_loaded = False
 def load_and_apply_config():
     """Load config and update global variables. Called from main()."""
     global DEVICE_ID, LOCATION_NAME, SERVER_URL, GRID_VOLTAGE
-    global CT_RATING, SEND_INTERVAL, DETECTED_TIMEZONE, _config_loaded
+    global CT_RATING, SEND_INTERVAL, DETECTED_TIMEZONE, CT_CHANNELS, _config_loaded
 
     cfg = load_config()
     validated = validate_config(cfg)
@@ -214,6 +231,11 @@ def load_and_apply_config():
     CT_RATING         = validated["CT_RATING"]
     SEND_INTERVAL     = validated["SEND_INTERVAL"]
     DETECTED_TIMEZONE = validated["DETECTED_TIMEZONE"]
+
+    # Rebuild CT_CHANNELS to only include active channels
+    active_list = validated["ACTIVE_CTS"]
+    CT_CHANNELS = {ct: ct - 1 for ct in sorted(active_list)}
+
     _config_loaded = True
 
 # ============================================================
@@ -254,7 +276,7 @@ def init_spi():
     try:
         spi = spidev.SpiDev()
         spi.open(0, 0)
-        spi.max_speed_hz = 500_000
+        spi.max_speed_hz = 1_350_000
         log_message("✅ SPI initialized successfully")
         return True
     except FileNotFoundError:
@@ -358,6 +380,49 @@ def calculate_power_for_ct(samples, ct_num):
 
 def calculate_all_ct_power(all_samples):
     return {ct: calculate_power_for_ct(all_samples.get(ct), ct) for ct in CT_CHANNELS}
+
+def collect_continuous_and_average():
+    """Sample continuously across the full send interval, averaging multiple windows.
+
+    Each window captures 8 AC cycles (~133ms at 60Hz) with NUM_SAMPLES readings.
+    We repeat windows back-to-back to fill SEND_INTERVAL, then average the
+    per-window power results. This gives ~93% time coverage instead of ~13%.
+    """
+    window_duration = 8.0 / FREQUENCY  # ~133ms for 60Hz
+    num_windows = max(1, int(SEND_INTERVAL / window_duration))
+
+    # Collect per-window power results
+    window_results = []  # list of {ct: {power, current, ...}} dicts
+    for _ in range(num_windows):
+        samples = collect_all_ct_samples(NUM_SAMPLES)
+        results = calculate_all_ct_power(samples)
+        window_results.append(results)
+
+    # Average across all windows
+    averaged = {}
+    for ct in CT_CHANNELS:
+        ct_windows = [w[ct] for w in window_results if w.get(ct) is not None]
+        if not ct_windows:
+            averaged[ct] = None
+            continue
+
+        avg_power = sum(w['power'] for w in ct_windows) / len(ct_windows)
+        avg_current = sum(w['current'] for w in ct_windows) / len(ct_windows)
+        max_variation = max(w['variation'] for w in ct_windows)
+
+        # Recalculate PF based on averaged values
+        pf = 0.9 if avg_power > 0 else 0.0
+
+        averaged[ct] = {
+            "power": round(avg_power, 2),
+            "current": round(avg_current, 4),
+            "voltage": GRID_VOLTAGE,
+            "pf": pf,
+            "variation": max_variation,
+            "windows": len(ct_windows)
+        }
+
+    return averaged, num_windows
 
 # ============================================================
 # Networking - Optimized with connection pooling & background sending
@@ -603,7 +668,13 @@ def main():
     log_message("="*60)
     log_message(f"Device ID: {DEVICE_ID}")
     log_message(f"Location: {LOCATION_NAME}")
+    active_ct_list = sorted(CT_CHANNELS.keys())
+    window_duration = 8.0 / FREQUENCY
+    num_windows = max(1, int(SEND_INTERVAL / window_duration))
+    samples_per_ch_per_cycle = NUM_SAMPLES // 8  # approx samples per AC cycle per channel
     log_message(f"Voltage: {GRID_VOLTAGE}V | CT Rating: {CT_RATING}A | Interval: {SEND_INTERVAL}s")
+    log_message(f"Active CTs: {','.join(str(c) for c in active_ct_list)} | SPI: 1.35MHz")
+    log_message(f"Sampling: {NUM_SAMPLES} samples/window | {num_windows} windows/interval | ~{samples_per_ch_per_cycle} samples/cycle")
     log_message(f"Server: {SERVER_URL}")
     log_message("="*60)
 
@@ -633,8 +704,8 @@ def main():
         try:
             loop_start = time.time()
 
-            samples = collect_all_ct_samples(NUM_SAMPLES)
-            results = calculate_all_ct_power(samples)
+            # Continuous sampling: fill the entire interval with back-to-back windows
+            results, num_windows = collect_continuous_and_average()
 
             if any(res for res in results.values()):
                 payload = {
@@ -644,7 +715,8 @@ def main():
                     "timezone": DETECTED_TIMEZONE,
                     "readings": {"cts": {}, "voltage_rms": round(GRID_VOLTAGE,1)}
                 }
-                for ct in range(1,7):
+                # Send data for all 6 CTs (zeros for inactive ones)
+                for ct in range(1, 7):
                     res = results.get(ct)
                     if res:
                         payload["readings"]["cts"][f"ct_{ct}"] = {
@@ -662,7 +734,7 @@ def main():
                 status = "✅" if ok else "⚠️"
 
                 loop_time = (time.time() - loop_start) * 1000
-                log_message(f"{status} {format_ct_results_for_log(results)} | {msg} | {loop_time:.0f}ms")
+                log_message(f"{status} {format_ct_results_for_log(results)} | {num_windows}win | {msg} | {loop_time:.0f}ms")
             else:
                 log_message("❌ No valid readings from CTs")
 
