@@ -185,16 +185,21 @@ def validate_config(cfg):
         errors.append(f"SERVER_URL must start with http:// or https://, using {SERVER_URL}")
         server = SERVER_URL
 
-    # Validate ACTIVE_CTS
+    # Validate ACTIVE_CTS (parse each entry individually so one bad value doesn't lose the rest)
     active_cts_str = cfg.get("ACTIVE_CTS", ACTIVE_CTS)
-    try:
-        active_cts_list = [int(x.strip()) for x in active_cts_str.split(",") if x.strip()]
-        active_cts_list = [x for x in active_cts_list if 1 <= x <= 6]
-        if not active_cts_list:
-            errors.append(f"ACTIVE_CTS has no valid channels (1-6), using all")
-            active_cts_list = [1, 2, 3, 4, 5, 6]
-    except ValueError:
-        errors.append(f"ACTIVE_CTS invalid, using all channels")
+    active_cts_list = []
+    for x in active_cts_str.split(","):
+        x = x.strip()
+        if not x:
+            continue
+        try:
+            val = int(x)
+            if 1 <= val <= 6:
+                active_cts_list.append(val)
+        except ValueError:
+            errors.append(f"ACTIVE_CTS: ignoring invalid entry '{x}'")
+    if not active_cts_list:
+        errors.append(f"ACTIVE_CTS has no valid channels (1-6), using all")
         active_cts_list = [1, 2, 3, 4, 5, 6]
 
     # Print any validation errors
